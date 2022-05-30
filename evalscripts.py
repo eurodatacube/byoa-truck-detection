@@ -13,7 +13,7 @@ def create_evalscript(td_thresholds, cm_thresholds):
 
     Args:
         td_thresholds (dict): Thresholds for Truck Detection.
-        cm_threshold ([type]): Thresholds for Cloud masking.
+        cm_thresholds ([type]): Thresholds for Cloud masking.
 
     Returns:
         str: Evalscript with inserted inputs.
@@ -25,15 +25,10 @@ def create_evalscript(td_thresholds, cm_thresholds):
       function setup() {{
         return {{
           input: [{{
-            bands: ["B02", "B03", "B04", "B08", "B11", "CLM", "SCL"],
-            units: ["REFLECTANCE", "REFLECTANCE", "REFLECTANCE", "REFLECTANCE", "REFLECTANCE", "DN", "DN"]
+            bands: ["B02", "B03", "B04", "B08", "B11", "SCL"],
+            units: ["REFLECTANCE", "REFLECTANCE", "REFLECTANCE", "REFLECTANCE", "REFLECTANCE", "DN"]
           }}],
           output: [
-            {{
-              id: "cloud_mask",
-              bands: 1,
-              sampleType: SampleType.UINT8
-            }},
             {{
               id: "trucks",
               bands: 1,
@@ -71,7 +66,6 @@ def create_evalscript(td_thresholds, cm_thresholds):
         let band_b = new Array(n_observations).fill(0);
         let band_g = new Array(n_observations).fill(0);
         let band_r = new Array(n_observations).fill(0);
-        let band_clm = new Array(n_observations).fill(0);
         let band_ndvi_mask = new Array(n_observations).fill(0);
         let band_ndwi_mask = new Array(n_observations).fill(0);
         let band_ndsi_mask = new Array(n_observations).fill(0);
@@ -100,7 +94,6 @@ def create_evalscript(td_thresholds, cm_thresholds):
           band_b[index] = sample.B02 * f;
           band_g[index] = sample.B03 * f;
           band_r[index] = sample.B04 * f;
-          band_clm[index] = sample.CLM;
           band_ndvi_mask[index] = (sample.B08-sample.B04)/(sample.B08+sample.B04) < {td_thresholds["max_ndvi"]};
           band_ndwi_mask[index] = (sample.B02-sample.B11)/(sample.B02+sample.B11) < {td_thresholds["max_ndwi"]};
           band_ndsi_mask[index] = (sample.B03-sample.B11)/(sample.B03+sample.B11) < {td_thresholds["max_ndsi"]};
@@ -124,7 +117,6 @@ def create_evalscript(td_thresholds, cm_thresholds):
         }});
 
         return {{
-          cloud_mask: band_clm,
           trucks: band_trucks,
           f_cloud: band_f_cloud
         }};

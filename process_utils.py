@@ -15,21 +15,22 @@ from rasterio.features import rasterize
 class Process(object):
     """Class for processing tiles' data."""
 
-    def __init__(self, config, bucket_name, batchID, tiles_info, tiles_list):
+    def __init__(
+            self,
+            config,
+            bucket_name,
+            tiles_info,
+    ):
         """Constructs the necessary attributes for the Process object.
 
         Args:
             config (Object): the sentinel hub configuration SHConfig()
             bucket_name (str): the name of your S3 bucket on AWS
-            batchID (str): The ID of the Batch request.
             tiles_info (GeoDataFrame): A GeoDataFrame containing tiles' id, geometry, shape, transform, crs, and osm road polygons.
-            tiles_list (list): A list of tiles' id obtained from tiles_info.
         """
         self.config = config
         self.bucket_name = bucket_name
-        self.batchID = batchID
         self.tiles_info = tiles_info
-        self.tiles_list = tiles_list
 
     def osm_raster(self, row, mode):
         """Rasterise OSM data.
@@ -59,6 +60,7 @@ class Process(object):
 
             # If there are roads in the tile
             else:
+
                 # Loop through geometries and get iteritems
                 iter_obj = [
                     (x, 1) for j, x in self.tiles_info["OSM_roads"][row].iteritems()
@@ -106,21 +108,21 @@ class Process(object):
         return raster
 
     def get_xrds(
-        self,
-        row,
-        days_sel,
-        osm_raster,
-        bands_name=["cloud_mask.tif", "f_cloud.tif", "trucks.tif"],
+            self,
+            key,
+            days_sel,
+            osm_raster,
+            bands_name=["f_cloud.tif", "trucks.tif"],
     ):
         """Build xarray dataset.
 
         Walk through all bands in a tile and build a cube for a tile.
 
         Args:
-            row (int): The integer indicating the row of tiles_info.
+            key (int): The object key to the tile in S3 bucket.
             days_sel (list): A list of selected days in a week.
             osm_raster (numpy ndarray): The raster data of osm roads.
-            bands_name (list, optional): A list of bands' name required to build the xarray dataset. Defaults to ["cloud_mask.tif", "f_cloud.tif", "trucks.tif"].
+            bands_name (list, optional): A list of bands' name required to build the xarray dataset. Defaults to ["f_cloud.tif", "trucks.tif"].
 
         Returns:
             xarray Dataset: A xarray dataset containing required data to output the result of turck detection.
@@ -133,18 +135,10 @@ class Process(object):
             aws_secret_access_key=self.config.aws_secret_access_key,
         )
 
-        # Setup S3 filesytem
-        s3fs = S3FS(
-            self.bucket_name,
-            dir_path=self.batchID,
-            aws_access_key_id=self.config.aws_access_key_id,
-            aws_secret_access_key=self.config.aws_secret_access_key,
-        )
-
-        # Open cloud_mask.tif with rasterio to get basic tile info
+        # Open f_cloud.tif with rasterio to get basic tile info
         with rio.Env(rio.session.AWSSession(AWS_session)) as env:
             with rio.open(
-                f"s3://{self.bucket_name}/{self.batchID}/{self.tiles_list[row]}/cloud_mask.tif"
+                    f"s3://{self.bucket_name}/{key}f_cloud.tif"
             ) as src:
 
                 # Obtain tiles' height and width
@@ -172,11 +166,10 @@ class Process(object):
             # Get timestamps
             AWS_resourse = AWS_session.resource("s3")
             content_obj = AWS_resourse.Object(
-                self.bucket_name, f"{self.batchID}/{self.tiles_list[row]}/userdata.json"
+                self.bucket_name, f"{key}userdata.json"
             )
             file_content = content_obj.get()["Body"].read().decode("utf-8")
             json_content = json.loads(file_content)
-            nb_dates = int(json_content["nb_dates"])
             date_li = json_content["dates"][2:-2].split('","')
             time_obj = [
                 dt.datetime.strptime(x, "%Y-%m-%dT%H:%M:%S.%fZ") for x in date_li
@@ -186,7 +179,7 @@ class Process(object):
             if len(days_sel) < 7:
 
                 # Convert datetime object to integer, i.e., Monday to 1, Tuesday to 2, ..., and Sunday to 7
-                weekday_li = [x.isoweekday() for x in time_obj]
+                weekday_li = [date.isoweekday() for date in time_obj]
 
                 # Count the times that the selected days appears in weekday_li, e.g., Monday appears 5 times; Tuesday apperas 7 times
                 count_dict = Counter(weekday_li)
@@ -221,18 +214,17 @@ class Process(object):
                     day_ind = sorted(day_ind)
 
                     # Get selected days' timestamps
-                    time_obj = [time_obj[i] for i in day_ind]
+                    time_obj = [time_obj[index] for index in day_ind]
 
                     # Create zero-arryas for cloud mask, fisser's cloud mask, and trucks data storage
-                    cm = np.zeros((time_size, height, width))
                     fc = np.zeros((time_size, height, width))
                     trucks = np.zeros((time_size, height, width))
 
                     # Walk through all bands
-                    for (band, arr) in zip(bands_name, [cm, fc, trucks]):
+                    for (band, arr) in zip(bands_name, [fc, trucks]):
 
                         # Set the route of files
-                        s3_url = f"s3://{self.bucket_name}/{self.batchID}/{self.tiles_list[row]}/{band}"
+                        s3_url = f"s3://{self.bucket_name}/{key}{band}"
 
                         # Open the file with rasterio
                         with rio.open(s3_url) as src:
@@ -240,10 +232,10 @@ class Process(object):
                             # Read data in tif
                             data = src.read()
 
-                            # Write data to corresponding array, e.g., cloud mask data to cm array; fisser's cloud mask
+                            # Write data to corresponding array, e.g., fisser's cloud mask
                             #  data to fc array; trucks data to trucks array
                             for band_posn, day_posn in zip(
-                                range(len(day_ind)), day_ind
+                                    range(len(day_ind)), day_ind
                             ):
                                 arr[band_posn, :, :] = data[day_posn, :, :]
 
@@ -251,29 +243,28 @@ class Process(object):
             elif len(days_sel) == 7:
 
                 # Create zero-arryas for cloud mask, fisser's cloud mask, and trucks data storage
-                cm = np.zeros((len(time_obj), height, width))
                 fc = np.zeros((len(time_obj), height, width))
                 trucks = np.zeros((len(time_obj), height, width))
 
                 # Walk through all bands
-                for (band, arr) in zip(bands_name, [cm, fc, trucks]):
+                for (band, arr) in zip(bands_name, [fc, trucks]):
 
                     # Set the route of files
-                    s3_url = f"s3://{self.bucket_name}/{self.batchID}/{self.tiles_list[row]}/{band}"
+                    s3_url = f"s3://{self.bucket_name}/{key}{band}"
 
                     # Open the file with rasterio
                     with rio.open(s3_url) as src:
 
                         # Read data in tif
                         data = src.read()
-                        
+
                         # bug temp fix: if bands > time_obj
                         if data.shape[0] > len(time_obj):
-                            
+
                             dif = int(len(time_obj) - data.shape[0])
-                            
+
                             arr[:, :, :] = data[:dif, :, :]
-                            
+
                         else:
 
                             # Write data to corresponding array
@@ -292,7 +283,6 @@ class Process(object):
             # Build xarray dataset
             xrds = xr.Dataset(
                 {
-                    "cloud_mask": (["time", "lat", "lon"], cm),
                     "f_cloud": (["time", "lat", "lon"], fc),
                     "trucks": (["time", "lat", "lon"], trucks),
                     "osm": (["lat", "lon"], osm_raster),
@@ -323,7 +313,7 @@ class Process(object):
 
             # If the percentage of cloudy area over roads is higher than MaxCC
             if (
-                np.sum(xrds["f_cloud"][t, :, :] * xrds["osm"]) / np.sum(xrds["osm"])
+                    np.sum(xrds["f_cloud"][t, :, :] * xrds["osm"]) / np.sum(xrds["osm"])
             ) > (MaxCC / 100):
 
                 # Append index to the drop_list
@@ -382,12 +372,12 @@ class Process(object):
                 filtered_trucks[y_above_next, x] if y_above_next >= 0 else 0
             )
             if (
-                val_left_above
-                + val_right_above
-                + val_left
-                + val_above
-                + val_left_next
-                + val_above_next
+                    val_left_above
+                    + val_right_above
+                    + val_left
+                    + val_above
+                    + val_left_next
+                    + val_above_next
             ) >= 1:
                 filtered_trucks[y, x] = 0
         return filtered_trucks

@@ -6,21 +6,15 @@ This file is part of the Truck Detection Algorithm.
 
 EDC consortium / H. Fisser
 """
-import sys
 import warnings
-from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 import logging
 
 import boto3
-import fiona
 import geopandas as gpd
 import numpy as np
-import pandas as pd
 import rasterio
-from edc import setup_environment_variables
-from fs_s3fs import S3FS
 from sentinelhub import CRS, BBox, Geometry, SHConfig
 from tqdm import tqdm
 from xcube_geodb.core.geodb import GeoDBClient
@@ -31,16 +25,16 @@ from batch import Batch
 from osm_utils import Osm
 from process_utils import Process
 
-logging.basicConfig()
 LOGGER = logging.getLogger(__name__)
+
 
 class TruckDetector(object):
     """Truck detection class.
 
     Attributes:
-        bbox (list): list of coordinates forming the bounding box (AOI).
+        aoi (str): An area of interest as a polygon or multipolygon in wkt format.
         proj (int): CRS (EPSG code) of the coordinates in the bbox.
-        time_period (list): A list with start date and end date as a string in the formt of YYYY-MM-DD
+        time_period (list): A list with start date and end date as a string in the format of YYYY-MM-DD
         output_folder (str, optional): The output folder for the summary log. Defaults to "./truck_detection_results".
         config (Object, optional): The sentinel hub configuration SHConfig(). Defaults to None.
 
@@ -59,44 +53,59 @@ class TruckDetector(object):
     """
 
     def __init__(
-        self,
-        aoi,
-        proj,
-        time_period,
-        output_folder="./truck_detection_results",
-        config=None,
+            self,
+            aoi,
+            proj,
+            time_period,
+            output_folder="./truck_detection_results",
+            config=SHConfig(),
     ):
         """Constructs the necessary attributes for the TruckDetector object.
 
         Args:
-            bbox (list): list of coordinates forming the bounding box (AOI).
+            aoi (str): An area of interest as a polygon or multipolygon in wkt format.
             proj (int): CRS (EPSG code) of the coordinates in the bbox.
-            time_period (list): A list with start date and end date as a string in the formt of YYYY-MM-DD
-            output_folder (str, optional): The output folder for the summary log. Defaults to "./truck_detection_results".
+            time_period (str): A list with start date and end date as a string in the format of YYYY-MM-DD
+            output_folder (str, optional): The output folder for the summary log.
+            Defaults to "./truck_detection_results".
             config (Object, optional): The sentinel hub configuration SHConfig(). Defaults to None.
         """
-        self.config = SHConfig()
+        self.config = config
         self.aws_bucket = None
-        self.aoi = aoi
-        def _get_geom_and_coords():
-            geom = loads(self.aoi)
-            coords = [[coord[0], coord[1]] for coord in list(geom.exterior.coords)]
+
+        def _get_geom_and_coords(wkt):
+            geom = loads(wkt)
+            if geom.geom_type == 'Polygon':
+                coords = [[[
+                    [coord[0], coord[1]] for coord in list(geom.exterior.coords)
+                ]]]
+            elif geom.geom_type == 'MultiPolygon':
+                coords = []
+                for polygon in geom:
+                    poly_coords = [[
+                        [coord[0], coord[1]] for coord in list(polygon.exterior.coords)
+                    ]]
+                    coords.append(poly_coords)
+            else:
+                raise TypeError("Input aoi should be Polygon or MultiPolygon.")
             return geom, coords
-        self.aoi_geom, self.aoi_coords = _get_geom_and_coords()
+
+        self.aoi_geom, self.aoi_coords = _get_geom_and_coords(aoi)
         self.crs = proj
-        def _get_time_period_list():
-            start_date = time_period.split("/")[0]
-            end_date = time_period.split("/")[1]
-            return [start_date, end_date]
-        self.time_period = _get_time_period_list()
+
+        def _get_start_and_end_date(date_range):
+            start_date = date_range.split("/")[0]
+            end_date = date_range.split("/")[1]
+            return start_date, end_date
+
+        self.start_date, self.end_date = _get_start_and_end_date(time_period)
         self.tile_info = None
         self.td_thresholds = {}
         self.cm_thresholds = {}
-        self.filter = {}
-        self.batchID = None
-        self.results = None
+        self.filter = {"MaxCC": None}
+        self.batch_id = None
+        self.tile_keys = None
         self.output_folder = output_folder
-        self.request = None
         self.geodb_collection = None
         self.mode = None
         self.out_format = ["GEODB", "GPKG", "SHP", "GEOJSON"]
@@ -131,20 +140,20 @@ class TruckDetector(object):
         self.aws_bucket = aws_bucket
 
     def set_td_thresholds(
-        self,
-        min_blue=0.06,
-        min_green=0.04,
-        min_red=0.04,
-        max_blue=0.2,
-        max_green=0.15,
-        max_red=0.15,
-        max_ndvi=0.5,
-        max_ndwi=0.0001,
-        max_ndsi=0.0001,
-        min_blue_green_ratio=0.03,
-        min_blue_red_ratio=0.05,
-        max_blue_green_ratio=0.17,
-        max_blue_red_ratio=0.2,
+            self,
+            min_blue=0.06,
+            min_green=0.04,
+            min_red=0.04,
+            max_blue=0.2,
+            max_green=0.15,
+            max_red=0.15,
+            max_ndvi=0.5,
+            max_ndwi=0.0001,
+            max_ndsi=0.0001,
+            min_blue_green_ratio=0.03,
+            min_blue_red_ratio=0.05,
+            max_blue_green_ratio=0.17,
+            max_blue_red_ratio=0.2,
     ):
         """Set thresholds for truck detection.
 
@@ -163,7 +172,7 @@ class TruckDetector(object):
             max_blue_green_ratio (float, optional): maximum blue/green ratio threshold. Defaults to 0.17.
             max_blue_red_ratio (float, optional): maximum blue/red ratio threshold. Defaults to 0.2.
         """
-        # Build a dictionnary from the input thresholds
+        # Build a dictionary from the input thresholds
         self.td_thresholds = {
             "min_blue": min_blue,
             "min_green": min_green,
@@ -188,7 +197,7 @@ class TruckDetector(object):
             blue_green (float, optional): Blue/Green ratio threshold. Defaults to 0.2.
             blue_red (float, optional): Blue/Red ratio threshold. Defaults to 0.2.
         """
-        # Build a dictionnary from the input thresholds
+        # Build a dictionary from the input thresholds
         self.cm_thresholds = {
             "rgb": rgb,
             "blue_green": blue_green,
@@ -251,8 +260,8 @@ class TruckDetector(object):
             self.aws_bucket,
             self.aoi_coords,
             self.crs,
-            self.time_period[0],
-            self.time_period[1],
+            self.start_date,
+            self.end_date,
         )
 
         # If not already set, put default thresholds for truck and cloud detection
@@ -263,34 +272,26 @@ class TruckDetector(object):
             self.set_cm_thresholds()
 
         # Run the Batch request
-        batch_request.run(self.td_thresholds, self.cm_thresholds)
+        batch_request.create_request(self.td_thresholds, self.cm_thresholds)
 
-        # Get batchID
-        self.batchID = batch_request.batchID
+        batch_request.analyse_request()
 
-        # Get request
-        self.request = batch_request
+        batch_request.data_availability()
 
-        # Get info
-        self.tile_info = batch_request.get_tiles_info()
+        if batch_request.availability.check_data_availability():
+            batch_request.cancel_request()
+            tile_keys = batch_request.availability.get_available_tiles_keys()
+            new_request_obj_key = batch_request.availability.get_new_request_obj_key()
+            batch_request.availability.delete_new_request_obj(new_request_obj_key)
+        else:
+            batch_request.start_batch()
+            batch_request.monitor_batch()
 
-    def batch_status(self):
-        """Retrieve the status of a previously run Batch request."""
-        # Initialise a batch class
-        batch_request = Batch(
-            self.config,
-            self.aws_bucket,
-            self.aoi_coords,
-            self.crs,
-            self.time_period[0],
-            self.time_period[1],
-        )
+            # Get batchID
+            self.batch_id = batch_request.batch_id
+            tile_keys = batch_request.get_tile_keys()
 
-        # Get status
-        status = batch_request.get_status(self.batchID)
-
-        # Print the status
-        print(status)
+        self.tile_keys = tile_keys
 
     def get_tile_info(self):
         """Fetch the information about Batch tiles located in a AWS bucket.
@@ -298,44 +299,32 @@ class TruckDetector(object):
         To use a previously executed Batch request, manually set the `request_id` parameter in the class attributes.
         """
         # Create an Amazon boto session
-        AWS_session = boto3.Session(
+        aws_session = boto3.Session(
             aws_access_key_id=self.config.aws_access_key_id,
             aws_secret_access_key=self.config.aws_secret_access_key,
         )
-
-        # Setup S3 filesytem
-        s3fs = S3FS(
-            self.aws_bucket,
-            dir_path=self.batchID,
-            aws_access_key_id=self.config.aws_access_key_id,
-            aws_secret_access_key=self.config.aws_secret_access_key,
-        )
-
-        # Go through the files
-        folders = [x for x in s3fs.listdir("/") if not x.endswith("json")]
 
         # Create a dictionary to contain tiles' info. Geometry is used for querying osm data;
         #  shape and transform are used for rasterization
-        d = {"tile": [], "geometry": [], "shape": [], "transform": []}
+        d = {"tile": [], "geometry": [], "shape": [], "transform": [], "key": []}
 
-        # Retrieve tiles' name, geometry, shape, and transform from cloud_mask.tif
-        for tile in folders:
-
+        # Retrieve tiles' name, geometry, shape, and transform from f_cloud.tif
+        for key in self.tile_keys:
             # Append tiles' name to "tile" column
-            d["tile"].append(tile)
+            d["tile"].append(key.split("/")[1])
+            d["key"].append(key)
 
-            # Open cloud_mask.tif with rasterio to collect tiles' info
-            with rasterio.Env(rasterio.session.AWSSession(AWS_session)) as env:
-                s3_url = f"s3://{self.aws_bucket}/{self.batchID}/{tile}/cloud_mask.tif"
+            # Open f_cloud.tif with rasterio to collect tiles' info
+            with rasterio.Env(rasterio.session.AWSSession(aws_session)) as env:
+                s3_url = f"s3://{self.aws_bucket}/{key}f_cloud.tif"
                 with rasterio.open(s3_url) as source:
-
                     # Retrieve bounding box and crs
                     bbox = BBox(source.bounds, CRS(source.crs.to_epsg()))
 
                     # Store geometry and crs info in sentinelhub Geometry object
                     geometry = Geometry(bbox.geometry, CRS(source.crs.to_epsg()))
 
-                    # Append geometry to "geometry" columm
+                    # Append geometry to "geometry" column
                     d["geometry"].append(geometry)
 
                     # Append shape to "shape" column
@@ -364,18 +353,18 @@ class TruckDetector(object):
         osm_roads = Osm(self.tile_info, values)
 
         # fetch osm data from GeoDB if the AOI is covered by our collection and download osm data if not covered.
-        if download == False:
+        if not download:
 
             # set the bbox of our GeoDB
             bbox_geodb = osm_roads.get_total_bounds()
 
             geom_geodb = Polygon(
                 [
-                    (bbox_geodb[0],bbox_geodb[1]),
+                    (bbox_geodb[0], bbox_geodb[1]),
                     (bbox_geodb[2], bbox_geodb[1]),
                     (bbox_geodb[2], bbox_geodb[3]),
                     (bbox_geodb[0], bbox_geodb[3]),
-                    (bbox_geodb[0],bbox_geodb[1])
+                    (bbox_geodb[0], bbox_geodb[1])
                 ]
             )
 
@@ -387,7 +376,7 @@ class TruckDetector(object):
 
                 # silence warnings of geometry column contains no geometry
                 warnings.filterwarnings("ignore")
-                
+
                 # get OSM data from the GeoDB
                 osm_roads.get_osm(mode=self.mode)
 
@@ -402,7 +391,7 @@ class TruckDetector(object):
                 osm_roads.get_osm(mode=self.mode)
 
         # if download is set as True
-        elif download == True:
+        elif download:
 
             # set to downloading mode
             self.mode = 1
@@ -427,7 +416,7 @@ class TruckDetector(object):
         # Connect to GeoDB
         geodb = GeoDBClient()
 
-        # Set collection's crs and properities
+        # Set collection's crs and properties
         collections = {
             f"{dt_string}": {
                 "crs": int(crs_out[5:]),
@@ -441,7 +430,7 @@ class TruckDetector(object):
         # Create collections
         geodb.create_collections(collections)
 
-        # assing geodb collection's idenfifier
+        # assign geodb collection's identifier
         self.geodb_collection = dt_string
 
         return geodb
@@ -453,12 +442,13 @@ class TruckDetector(object):
         Filter data, build Xarray dataset, and output detected trucks as geometry points.
 
         Args:
+            out_format (str): Should be one of "GEODB", "GPKG", "SHP", "GEOJSON".
             crs_out (str, optional): Output projection of detected truck layers. Defaults to "EPSG:4326".
         """
 
         # If output folder doesn't exist, create it
         Path(self.output_folder).mkdir(parents=True, exist_ok=True)
-        
+
         # Set output path
         out_path = Path(self.output_folder)
 
@@ -466,9 +456,7 @@ class TruckDetector(object):
         process = Process(
             self.config,
             self.aws_bucket,
-            self.batchID,
-            self.tile_info,
-            self.tile_info["tile"],
+            self.tile_info
         )
 
         # format warning
@@ -477,61 +465,63 @@ class TruckDetector(object):
         # If weekday not already set, put all days in a week
         if not self.filter["days_sel"]:
             self.set_weekdays()
-        
+
         # If maximum cloud coverage not already set, put 1 for MaxCC
         if not self.filter["MaxCC"]:
-            self.filter["MaxCC"] = 1
+            self.filter["MaxCC"] = 100
 
         # If out_format is set to GeoDB
         if out_format.upper() == self.out_format[0]:
 
             # Create GeoDB collection
             geodb = self._create_geodb_collection(crs_out)
-        
+
         # If out_format is set to GPKG, SHP, or GeoJSON
         elif out_format.upper() in self.out_format[1:]:
 
             # Initialize a aoi_gdf as NoneType object
             aoi_gdf = None
-        
+
         # If out_format is set to others
         else:
 
-            # Rasie Keyerror
+            # Raise KeyError
             raise KeyError(f"Please select from {self.out_format}.")
 
         # Loop through all tiles in one batch
-        for i in tqdm(range(len(self.tile_info))):
+        for row in tqdm(range(len(self.tile_info))):
 
             # Open a text file for processing log
             with open(out_path.joinpath("Summary.txt"), "a") as log:
-                log.write(f"Tile {self.tile_info.tile[i]}\n")
+                log.write(f"Tile {self.tile_info['tile'].iloc[row]}\n")
 
             # Rasterize osm data
-            osm_raster = process.osm_raster(row=i, mode=self.mode)
+            osm_raster = process.osm_raster(row=row, mode=self.mode)
 
             # If there's no road in the tile
             if osm_raster is None:
 
                 # Write no roads in tile to summary log
                 with open(out_path.joinpath("Summary.txt"), "a") as log:
-                    log.write(f"No road in tile {self.tile_info.tile[i]}\n")
+                    log.write(f"No road in tile {self.tile_info['tile'].iloc[row]}\n")
 
             # If there are roads in the tile
             else:
 
                 # Build xarray dataset and extract timestamps
                 xrds, time_obj = process.get_xrds(
-                    row=i, days_sel=self.filter["days_sel"], osm_raster=osm_raster
+                    key=self.tile_info['key'].iloc[row],
+                    days_sel=self.filter["days_sel"],
+                    osm_raster=osm_raster
                 )
 
                 # If there is no available data
-                if (xrds is None and time_obj is None):
+                if xrds is None and time_obj is None:
 
                     # Write no available data for tile to summary log
                     with open(out_path.joinpath("Summary.txt"), "a") as log:
                         log.write(
-                            f"No available data for tile {self.tile_info.tile[i]}\n"
+                            f"No available data for tile {self.tile_info['tile'].iloc[row]}\n"
                         )
 
                 # If there is available data
@@ -539,7 +529,7 @@ class TruckDetector(object):
 
                     # Mask out cloud-covered and non-road area
                     xrds["trucks"] = (
-                        xrds["trucks"] * np.abs(1 - xrds["f_cloud"]) * xrds["osm"]
+                            xrds["trucks"] * np.abs(1 - xrds["f_cloud"]) * xrds["osm"]
                     )
 
                     # Drop cloudy data based on the MaxCC threshold
@@ -549,7 +539,6 @@ class TruckDetector(object):
 
                     # Loop through timestamps and filter out invalid truck points
                     for t in range(len(xrds["time"])):
-
                         # Filter duplicated trucks
                         trucks_filtered = process.trucks_filter(xrds["trucks"][t, :, :])
 
@@ -575,26 +564,27 @@ class TruckDetector(object):
                                 )
 
                             # Calculate roads covered in percentage
-                            roads_covered = float(np.sum(np.abs(1-xrds["f_cloud"][t, :, :]) * xrds["osm"]) / np.sum(xrds["osm"]) * 100)
-                            
+                            roads_covered = float(
+                                np.sum(np.abs(1 - xrds["f_cloud"][t, :, :]) * xrds["osm"]) / np.sum(xrds["osm"]) * 100)
+
                             # Retrieve detected trucks' lon and lat
                             lon = [xrds["lon"][ind] for ind in trucks_yx[:, 1]]
                             lat = [xrds["lat"][ind] for ind in trucks_yx[:, 0]]
 
                             # Covert lon and lat to geometry points
                             geometry = gpd.points_from_xy(
-                                lon, lat, crs=self.tile_info.CRS[i]
+                                lon, lat, crs=self.tile_info['CRS'].iloc[row]
                             )
 
                             # Create a dictionary to store geometry points, date, and roads covered (%)
                             d = {
-                                "Date": f'{xrds.time[t].dt.year.values}-{"%02d" % xrds.time[t].dt.month.values}-{"%02d" % xrds.time[t].dt.day.values}',
-                                "roads_covered": round(roads_covered, 2),
+                                "date": f'{xrds.time[t].dt.year.values}-{"%02d" % xrds.time[t].dt.month.values}-{"%02d" % xrds.time[t].dt.day.values}',
+                                "clear_road_percentage": round(roads_covered, 2),
                                 "geometry": geometry,
                             }
 
                             # Build a GeoDataFrame as a format to insert the results to GeoDB
-                            gdf = gpd.GeoDataFrame(d, crs=self.tile_info.CRS[i])
+                            gdf = gpd.GeoDataFrame(d, crs=self.tile_info['CRS'].iloc[row])
 
                             # Reproject the tile from UTM to EPSG:4326
                             gdf = gdf.to_crs(crs_out)
@@ -602,7 +592,7 @@ class TruckDetector(object):
                             # If out_format is set to GeoDB
                             if out_format.upper() == self.out_format[0]:
 
-                                #Insert to geodb
+                                # Insert to geodb
                                 geodb.insert_into_collection(f"{self.geodb_collection}", gdf)
 
                             # If out_format is set to GPKG, SHP, GeoJSON
@@ -613,7 +603,7 @@ class TruckDetector(object):
 
                                     # Assign gdf to aoi_gdf
                                     aoi_gdf = gdf
-                                
+
                                 # If aoi_gdf has values
                                 else:
 
@@ -622,19 +612,20 @@ class TruckDetector(object):
 
         # If out_format is set to GPKG
         if out_format.upper() == self.out_format[1]:
-            
+
             # Save as a layered GPKG file by dates
-            for date in set(aoi_gdf.Date):
-                aoi_gdf[aoi_gdf["Date"]==date].to_file(out_path.joinpath(f"result.{self.out_format[1].lower()}"), layer=date, driver=self.out_format[1])
-        
+            for date in set(aoi_gdf.date):
+                aoi_gdf[aoi_gdf["date"] == date].to_file(out_path.joinpath(f"result.{self.out_format[1].lower()}"),
+                                                         layer=date, driver=self.out_format[1])
+
         # If out_format is set to SHP
         elif out_format.upper() == self.out_format[2]:
-            
+
             # Save as shapefile
             aoi_gdf.to_file(out_path.joinpath(f"result.{self.out_format[2].lower()}"))
-        
+
         # If out_format is set to SHP
         elif out_format.upper() == self.out_format[3]:
-            
+
             # Save as geojson
             aoi_gdf.to_file(out_path.joinpath(f"result.{self.out_format[3].lower()}"), driver="GeoJSON")

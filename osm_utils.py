@@ -21,23 +21,23 @@ from shapely.geometry import shape
 from tqdm import tqdm
 from xcube_geodb.core.geodb import GeoDBClient
 
-
 logging.basicConfig(filename='truck_detector.log')
 LOGGER = logging.getLogger(__name__)
+
 
 class Osm(object):
     """OSM roads class."""
 
     def __init__(
-        self,
-        tiles_info,
-        osm_values,
-        roads_buffer=25,
-        offset=2,
-        osm_key="highway",
-        element_type=["way", "relation"],
-        geodb_collection="osm_europe_roads",
-        geodb_database="geodb_a2b85af8-6b99-4fa2-acf6-e87d74e40431",
+            self,
+            tiles_info,
+            osm_values,
+            roads_buffer=25,
+            offset=2,
+            osm_key="highway",
+            element_type=["way", "relation"],
+            geodb_collection="osm_europe_roads",
+            geodb_database="geodb_a2b85af8-6b99-4fa2-acf6-e87d74e40431",
     ):
         """Constructs the necessary attributes for the Osm object.
 
@@ -118,20 +118,20 @@ class Osm(object):
                 )
 
                 for attemp_num in range(3):
-                        try:
-                            # get elements of the query result
-                            elements = Overpass().query(query, timeout=120).elements()
-                            break
-                        except BaseException as exception:
-                            if attemp_num == 2:
-                                LOGGER.error(
-                                    f"Failed to download query: bbox={bbox_osm}, elementType={self.element_type}, selector={selector}",
-                                    exc_info=True
-                                )
-                                elements = []
-                            else:
-                                time.sleep(sleep_time)
-                                sleep_time *= backoff_coefficient
+                    try:
+                        # get elements of the query result
+                        elements = Overpass().query(query, timeout=120).elements()
+                        break
+                    except BaseException as exception:
+                        if attemp_num == 2:
+                            LOGGER.error(
+                                f"Failed to download query: bbox={bbox_osm}, elementType={self.element_type}, selector={selector}",
+                                exc_info=True
+                            )
+                            elements = []
+                        else:
+                            time.sleep(sleep_time)
+                            sleep_time *= backoff_coefficient
 
                 for element in elements:
                     geoms.append(element.geometry())
@@ -159,7 +159,7 @@ class Osm(object):
         return osm_roads_geoseries
 
     def _fetch_from_GeoDB(
-        self, tiles_gdf, row, osm_crs, original_crs, where_stmt, buffer_dict, road_dict
+            self, tiles_gdf, row, osm_crs, original_crs, where_stmt, buffer_dict, road_dict
     ):
         """Fetch osm data from GeoDB European osm collection.
 
@@ -202,6 +202,7 @@ class Osm(object):
             gs_osm = None
 
         else:
+
             # covert to original crs (UTM)
             osm_roads = osm_roads.to_crs(original_crs)
 
@@ -209,13 +210,12 @@ class Osm(object):
             for i in range(len(self.osm_values)):
                 # loop through all keys in road_dict (val, link, and junction)
                 for key in road_dict:
-
                     # buffer linestring to polygon
                     osm_roads.geometry[
                         osm_roads.highway == road_dict[key][i]
-                    ] = osm_roads.geometry[
+                        ] = osm_roads.geometry[
                         osm_roads.highway == road_dict[key][i]
-                    ].buffer(
+                        ].buffer(
                         buffer_dict[self.osm_values[i]]
                     )
 
@@ -232,10 +232,10 @@ class Osm(object):
             osm_crs (str, optional): The crs of the osm data. Defaults to "EPSG:4326".
         """
         # get origin crs
-        self.tiles["CRS"] = [x.crs.ogc_string() for x in self.tiles.geometry]
+        self.tiles['CRS'] = [x.crs.ogc_string() for x in self.tiles['geometry']]
 
         # keep original tile geometry
-        original_geom = [x for x in self.tiles.geometry]
+        original_geom = [x for x in self.tiles['geometry']]
 
         # convert tiles_gdf crs to EPSG:4326
         tiles_gdf = self._convert_crs(self.tiles, crs=osm_crs)
@@ -274,48 +274,48 @@ class Osm(object):
 
             # initialize a list to contain Geoseries
             gs_li = []
-            
+
             for row in tqdm(range(len(tiles_gdf))):
                 for attemp_num in range(4):
                     try:
                         osm_roads = self._fetch_from_GeoDB(
-                            tiles_gdf, 
-                            row, 
+                            tiles_gdf,
+                            row,
                             osm_crs,
-                            self.tiles["CRS"][row],
+                            self.tiles['CRS'].iloc[row],
                             where_stmt,
                             buffers_distance_dict,
                             road_dict
                         )
-                        
+
                         gs_li.append(osm_roads)
                         break
                     except BaseException as exception:
                         if attemp_num == 3:
                             LOGGER.error(
-                                f"Failed to fetch osm for tile {tiles_gdf.tile.iloc[row]}.",
+                                f"Failed to fetch osm for tile {tiles_gdf['tile'].iloc[row]}.",
                                 exc_info=True
                             )
                         else:
                             time.sleep(5)
 
             # assign osm geoseries list to the geodataframe as a new column OSM_roads
-            self.tiles["OSM_roads"] = gs_li
+            self.tiles['OSM_roads'] = gs_li
 
         # mode 1 for downloading data
         elif mode == 1:
             osm_roads = tiles_gdf.apply(
                 lambda x: self._update_roads(
-                    x["geometry"], x["CRS"], buffers_distance_dict
+                    x['geometry'], x['CRS'], buffers_distance_dict
                 ),
                 axis=1,
             )
 
             # assign osm geoseries list to the geodataframe as a new column OSM_roads
-            self.tiles["OSM_roads"] = osm_roads
+            self.tiles['OSM_roads'] = osm_roads
 
         # assign original geometries to the geometry column
-        self.tiles["geometry"] = original_geom
+        self.tiles['geometry'] = original_geom
 
     def _convert_crs(self, tiles_info, crs):
         """Convert tiles' crs to match osm data.
@@ -332,12 +332,12 @@ class Osm(object):
         for i in range(len(tiles_info)):
 
             # if crs is not  EPSG:4326, geometry is Sentinel Hub Geometry object
-            if tiles_info.geometry[i].crs != crs:
+            if tiles_info['geometry'].iloc[i].crs != crs:
 
                 # transform crs to target crs
-                tiles_info.geometry[i] = tiles_info.geometry[i].transform(crs)
+                tiles_info['geometry'].iloc[i] = tiles_info['geometry'].iloc[i].transform(crs)
             else:
-                tiles_info.geometry[i] = tiles_info.geometry[i]
+                tiles_info['geometry'].iloc[i] = tiles_info['geometry'].iloc[i]
 
         # return gdf with new target crs
         return tiles_info
@@ -409,7 +409,7 @@ class Osm(object):
             except BaseException as exception:
                 if attemp_num == 3:
                     LOGGER.error(
-                        "Failed to fetech the extents of the european osm road from geodb.", 
+                        "Failed to fetech the extents of the european osm road from geodb.",
                         exc_info=True
                     )
                 else:

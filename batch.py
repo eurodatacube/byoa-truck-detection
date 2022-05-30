@@ -10,22 +10,18 @@ import time
 from collections import Counter
 
 import boto3
-import geopandas as gpd
-import rasterio
 import logging
-from edc import setup_environment_variables
-from fs import open_fs
-from fs_s3fs import S3FS
 from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
-from sentinelhub import CRS, BBox, Geometry, SHConfig
 from tqdm import tqdm
 
-import evalscripts
+from evalscripts import create_evalscript
+from data_availability import DataAvailability
 
 LOGGER = logging.getLogger(__name__)
 
-class Batch(object):
+
+class Batch:
     """Batch Processing class.
 
     Attributes:
@@ -33,15 +29,20 @@ class Batch(object):
         bucket_name (str): the name of your S3 bucket on AWS
         aoi (list): list of coordinates forming the bounding box (AOI).
         crs (str):  CRS (EPSG code) of the coordinates in the AOI.
-        start (str):  Start date of the period to fetch data for in the formt of YYYY-MM-DD
-        end (str): End date of the period to fetch data for in the formt of YYYY-MM-DD
-        grid_id (int, optional): Predefined tiling grid ID (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 1.
-        grid_res (int, optional): Predefined tiling grid resolution (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 10.
+        start (str):  Start date of the period to fetch data for in the format of YYYY-MM-DD
+        end (str): End date of the period to fetch data for in the format of YYYY-MM-DD
+        grid_id (int, optional): Predefined tiling grid ID
+        (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 1.
+        grid_res (int, optional): Predefined tiling grid resolution
+        (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 10.
         data (str, optional): Satellite data to query. Defaults to "S2L2A".
-        mosaicking_order (str, optional): SH mosaicking order (https://docs.sentinel-hub.com/api/latest/evalscript/v3/#mosaicking). Defaults to "mostRecent".
+        mosaicking_order (str, optional): SH mosaicking order
+        (https://docs.sentinel-hub.com/api/latest/evalscript/v3/#mosaicking). Defaults to "mostRecent".
         max_cloud_coverage (int, optional): Maximum cloud cover in percentage. Defaults to 100.
-        upsampling (str, optional): Upsampling method, depends on sensor (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options). Defaults to "NEAREST".
-        downsampling (str, optional): Downsampling method, depends on sensor (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options).. Defaults to "NEAREST".
+        upsampling (str, optional): Upsampling method, depends on sensor
+        (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options). Defaults to "NEAREST".
+        downsampling (str, optional): Downsampling method, depends on sensor
+        (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options). Defaults to "NEAREST".
         descr (str, optional): User description for the Batch run. Defaults to "default".
 
     Methods:
@@ -53,21 +54,23 @@ class Batch(object):
     """
 
     def __init__(
-        self,
-        config,
-        bucket_name,
-        aoi,
-        crs,
-        start,
-        end,
-        grid_id=1,
-        grid_res=10,
-        data="sentinel-2-l2a",
-        mosaicking_order="mostRecent",
-        max_cloud_coverage=100,
-        upsampling="NEAREST",
-        downsampling="NEAREST",
-        descr="default",
+            self,
+            config,
+            bucket_name,
+            aoi,
+            crs,
+            start,
+            end,
+            grid_id=1,
+            grid_res=10,
+            data="sentinel-2-l2a",
+            mosaicking_order="mostRecent",
+            max_cloud_coverage=100,
+            upsampling="NEAREST",
+            downsampling="NEAREST",
+            descr="default",
+            batch_url="https://services.sentinel-hub.com/api/v1/batch/process",
+            token_url="https://services.sentinel-hub.com/oauth/token"
     ):
         """Constructs the necessary attributes for the Batch object.
 
@@ -75,17 +78,26 @@ class Batch(object):
             config (Object): the sentinel hub configuration SHConfig()
             bucket_name (str): the name of your S3 bucket on AWS
             aoi (list): list of coordinates forming the bounding box (AOI).
-            crs (str):  CRS (EPSG code) of the coordinates in the AOI.
-            start (str):  Start date of the period to fetch data for in the formt of YYYY-MM-DD
-            end (str): End date of the period to fetch data for in the formt of YYYY-MM-DD
-            grid_id (int, optional): Predefined tiling grid ID (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 1.
-            grid_res (int, optional): Predefined tiling grid resolution (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 10.
+            crs (int):  CRS (EPSG code) of the coordinates in the AOI.
+            start (str):  Start date of the period to fetch data for in the format of YYYY-MM-DD
+            end (str): End date of the period to fetch data for in the format of YYYY-MM-DD
+            grid_id (int, optional): Predefined tiling grid ID
+            (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 1.
+            grid_res (int, optional): Predefined tiling grid resolution
+            (https://docs.sentinel-hub.com/api/latest/api/batch/#tiling-grids). Defaults to 10.
             data (str, optional): Satellite data to query. Defaults to "S2L2A".
-            mosaicking_order (str, optional): SH mosaicking order (https://docs.sentinel-hub.com/api/latest/evalscript/v3/#mosaicking). Defaults to "mostRecent".
+            mosaicking_order (str, optional): SH mosaicking order
+            (https://docs.sentinel-hub.com/api/latest/evalscript/v3/#mosaicking). Defaults to "mostRecent".
             max_cloud_coverage (int, optional): Maximum cloud cover in percentage. Defaults to 100.
-            upsampling (str, optional): Upsampling method, depends on sensor (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options). Defaults to "NEAREST".
-            downsampling (str, optional): Downsampling method, depends on sensor (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options).. Defaults to "NEAREST".
+            upsampling (str, optional): Upsampling method, depends on sensor
+            (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options).
+            Defaults to "NEAREST".
+            downsampling (str, optional): Downsampling method, depends on sensor
+            (e.g. https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l2a/#processing-options).
+            Defaults to "NEAREST".
             descr (str, optional): User description for the Batch run. Defaults to "default".
+            batch_url (str, optional): The url of Batch Processing API endpoint.
+            token_url (str, optional): The url to fetch token for Sentinel Hub services.
         """
 
         self.config = config
@@ -102,53 +114,141 @@ class Batch(object):
         self.upsampling = upsampling
         self.downsampling = downsampling
         self.descr = descr
-        self.batchID = None
+        self.token_url = token_url
+        self.batch_url = batch_url
 
-    def _authentication(self):
-        """Authenticate with SH services
+        def _authenticate(sh_client_id, sh_client_secret, sh_token_url):
+            """Authenticate with SH services
+
+            Returns:
+                OAuth token: a bearer token for SH services.
+            """
+            client = BackendApplicationClient(client_id=sh_client_id)
+            oauth = OAuth2Session(client=client)
+            for retry in range(3):
+                try:
+                    token = oauth.fetch_token(
+                        token_url=sh_token_url,
+                        client_secret=sh_client_secret
+                    )
+                except BaseException as exception:
+                    if retry == 2:
+                        LOGGER.error(
+                            f"Failed to fetch the token. Reason: {exception}"
+                        )
+                        raise RuntimeError("Failed to fetch the token.")
+                    else:
+                        time.sleep(30)
+
+            return oauth, token
+
+        self.oauth, self.token = _authenticate(
+            config.sh_client_id, config.sh_client_secret, token_url
+        )
+        self.batch_id = None
+        self.availability = None
+
+    def _refresh_token_if_expires(self):
+        """Refresh token if it expires.
+        """
+        if time.time() > self.token['expires_at'] - 60:
+            for retry in range(3):
+                try:
+                    self.token = self.oauth.fetch_token(
+                        token_url=self.token_url,
+                        client_secret=self.config.sh_client_secret
+                    )
+                except BaseException as exception:
+                    if retry == 2:
+                        LOGGER.error(
+                            f"Failed to refresh the token. Reason: {exception}"
+                        )
+                        raise RuntimeError("Failed to refresh the token.")
+                    else:
+                        time.sleep(30)
+
+    def _get_request_status(self):
+        """Get request status.
 
         Returns:
-            OAuth token: a bearer token for SH services.
+            str: The batch request status.
         """
-        # Create a clinet
-        client = BackendApplicationClient(client_id=self.config.sh_client_id)
-        oauth = OAuth2Session(client=client)
+        request_url = f"{self.batch_url}/{self.batch_id}"
+        self._refresh_token_if_expires()
+        response = self.oauth.request("GET", request_url)
+        for retry in range(3):
+            try:
+                response.raise_for_status()
+                break
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(
+                        f"Failed to get the status. Reason: {exception}"
+                    )
+                    raise RuntimeError("Failed to get request status.")
+                else:
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request("GET", request_url)
+        return response.json()['status']
 
-        # Fetch token based on credentials
-        token = oauth.fetch_token(
-            token_url="https://services.sentinel-hub.com/oauth/token",
-            client_id=self.config.sh_client_id,
-            client_secret=self.config.sh_client_secret,
+    def _get_tiles_status(self):
+        """Get tile status.
+
+        Returns:
+            List: _description_
+        """
+        tiles_url = f"{self.batch_url}/{self.batch_id}/tiles"
+        self._refresh_token_if_expires()
+        response = self.oauth.request("GET", tiles_url)
+        for retry in range(3):
+            try:
+                response.raise_for_status()
+                break
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(
+                        f"Failed to get the tiles. Reason: {exception}"
+                    )
+                    raise RuntimeError("Failed to get tiles status.")
+                else:
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request("GET", tiles_url)
+        tiles_status = [tile["status"] for tile in response.json()["data"]]
+        return tiles_status
+
+    def _restart_partially_processed_request(self):
+        restart_url = f"{self.batch_url}/{self.batch_id}/restartpartial"
+        self._refresh_token_if_expires()
+        response = self.oauth.request("POST", restart_url)
+        for retry in range(3):
+            try:
+                response.raise_for_status()
+                break
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(
+                        f"Failed to restart the partially processed request. Reason: {exception}"
+                    )
+                    raise RuntimeError("Failed to restart partially processed request.")
+                else:
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request("POST", restart_url)
+        print(f"Batch: {self.batch_id} restarts processing the failed tiles.")
+
+    def create_request(self, td_thresholds, cm_thresholds):
+        evalscript = create_evalscript(
+            td_thresholds, cm_thresholds
         )
-        return oauth
-
-    def run(self, td_thresholds, cm_threshold):
-        """Run the Batch Processing API based on inputs stored as class attributes.
-
-        Args:
-            td_thresholds (dict): Thresholds for Truck Detection.
-            cm_threshold ([type]): Thresholds for Cloud masking.
-
-        Raises:
-            RuntimeError: All tiles failed.
-            RuntimeError: Batch failed after a fixed number of tries.
-        """
-        # Authentication
-        oauth = self._authentication()
-
-        # Set evalscript
-        evalscript = evalscripts.create_evalscript(td_thresholds, cm_threshold)
-
-        # Build payload based on class attributes
         payload = {
             "processRequest": {
                 "input": {
                     "bounds": {
                         "geometry": {
-                            "type": "Polygon",
-                            "coordinates": [
-                                self.aoi
-                            ]
+                            "type": "MultiPolygon",
+                            "coordinates": self.aoi
                         },
                         "properties": {
                             "crs": f"http://www.opengis.net/def/crs/EPSG/0/{self.crs}"
@@ -174,7 +274,6 @@ class Batch(object):
                 },
                 "output": {
                     "responses": [
-                        {"identifier": "cloud_mask", "format": {"type": "image/tiff"}},
                         {"identifier": "trucks", "format": {"type": "image/tiff"}},
                         {"identifier": "f_cloud", "format": {"type": "image/tiff"}},
                         {
@@ -189,165 +288,168 @@ class Batch(object):
             "bucketName": self.bucket_name,
             "description": self.descr,
         }
-        
-        for attemp_num in range(3):
+        self._refresh_token_if_expires()
+        response = self.oauth.request(
+            "POST",
+            self.batch_url,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+        )
+        for retry in range(3):
             try:
-                # Create request
-                response = oauth.request(
-                    "POST",
-                    "https://services.sentinel-hub.com/api/v1/batch/process",
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
-
-                # Raise for status if the request is erroneous
                 response.raise_for_status()
-
-                # Get requests id
-                batch_request_id = response.json()["id"]
-
-                # Start
-                response = oauth.request(
-                    "POST",
-                    f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}/start",
-                )
-
-                # Status check
-                status = oauth.request(
-                    "GET",
-                    f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}",
-                ).json()["status"]
-
-                print(f"Batch: {batch_request_id} is {status}.")
-
-                # A bit of delay to have time to start tile count
-                time.sleep(20)
-
-                # Get tiles
-                tiles_url = f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}/tiles"
-                tiles = oauth.request("GET", tiles_url)
-                status_tiles = [x["status"] for x in tiles.json()["data"]]
-
-                # Build a progress bar
-                pbar = tqdm(total=len(status_tiles))
-
-                # Set counter for while loop
-                count = 0
-
-                # Start looping on status of the Batch request
-                while status != "DONE":
-                    oauth = self._authentication()
-                    if status == "FAILED":
-                        LOGGER.error("All tiles failed processing")
-                        raise RuntimeError("All tiles failed processing")
-                    elif status == "PARTIAL":
-                        if count < 3:
-                            print(
-                                f"Batch: {batch_request_id} is {status}LY failed. Start re-processing all failed tiles."
-                            )
-                            LOGGER.warning(f"Batch: {batch_request_id} is {status}LY failed. Start re-processing all failed tiles.")
-                            response = oauth.request(
-                                "POST",
-                                f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}/restartpartial",
-                            )
-                            count += 1
-                            time.sleep(30)
-                            status = oauth.request(
-                                "GET",
-                                f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}",
-                            ).json()["status"]
-                        else:
-                            LOGGER.error(f"Stop re-processing Batch: {batch_request_id} after 3 tries")
-                            raise RuntimeError(
-                                f"Stop re-processing Batch: {batch_request_id} after {count} tries."
-                            )
-                    else:
-                        # Get tiles
-                        tiles_url = f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}/tiles"
-                        tiles = oauth.request("GET", tiles_url)
-                        status_tiles = [x["status"] for x in tiles.json()["data"]]
-                        pbar.update(Counter(status_tiles)["PROCESSED"])
-
-                        time.sleep(5)
-
-                        status = oauth.request(
-                            "GET",
-                            f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}",
-                        ).json()["status"]
-
-                pbar.close()
-                print(f"Batch: {batch_request_id} is {status}.")
-                self.batchID = batch_request_id
                 break
-                
             except BaseException as exception:
-                if attemp_num < 2:
-                    time.sleep(30)
+                if retry == 2:
+                    LOGGER.error(
+                        f"Failed to create the request. Reason: {exception}"
+                    )
+                    raise RuntimeError("Failed to create request.")
                 else:
-                    reason = oauth.request(
-                        "GET",
-                        f"https://services.sentinel-hub.com/api/v1/batch/process/{batch_request_id}",
-                    ).json()["error"]
-                    LOGGER.error(exception, exc_info=True)
-                    raise RuntimeError(f"Stop running batch due to server issues. Reason: {reason}")
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request(
+                        "POST",
+                        self.batch_url,
+                        headers={"Content-Type": "application/json"},
+                        json=payload,
+                    )
+        self.batch_id = response.json()["id"]
+        print(f"Batch: {self.batch_id} is CREATED.")
 
-    def get_tiles_info(self):
-        """Get information about tile from a Batch API request.
+    def analyse_request(self):
+        analyse_url = f"{self.batch_url}/{self.batch_id}/analyse"
+        self._refresh_token_if_expires()
+        response = self.oauth.request("POST", analyse_url)
+        for retry in range(3):
+            try:
+                response.raise_for_status()
+                break
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(f"ANALYSIS FAILED. Reason: {exception}")
+                    raise RuntimeError("Failed to analyse request.")
+                else:
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request("POST", analyse_url)
+        status = self._get_request_status()
+        while status not in ['ANALYSIS_DONE', 'FAILED']:
+            time.sleep(30)
+            status = self._get_request_status()
+        if status == 'FAILED':
+            raise RuntimeError(f"Batch: {self.batch_id} is FAILED analysis.")
+        else:
+            print(f"Batch: {self.batch_id} is DONE ANALYSIS.")
 
-        Returns:
-            geopandas.GeoDataframe: table containing information about Batch tiles.
-        """
-        # Create an Amazon boto session
-        AWS_session = boto3.Session(
-            aws_access_key_id=self.config.aws_access_key_id,
-            aws_secret_access_key=self.config.aws_secret_access_key,
+    def cancel_request(self):
+        cancel_url = f"{self.batch_url}/{self.batch_id}/cancel"
+        self._refresh_token_if_expires()
+        response = self.oauth.request("POST", cancel_url)
+        for retry in range(3):
+            try:
+                response.raise_for_status()
+                break
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(f"CANCELLATION FAILED. Reason: {exception}")
+                    raise RuntimeError("Failed to cancel request.")
+                else:
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request("POST", cancel_url)
+        print(f"Batch: {self.batch_id} is CANCELED.")
+
+    def data_availability(self):
+        self.availability = DataAvailability(
+            f"{self.start}/{self.end}",
+            self.batch_id,
+            self.config,
+            self.bucket_name
         )
 
-        # Setup S3 filesytem
-        s3fs = S3FS(
-            self.bucket_name,
-            dir_path=self.batchID,
-            aws_access_key_id=self.config.aws_access_key_id,
-            aws_secret_access_key=self.config.aws_secret_access_key,
-        )
+    def start_batch(self):
+        """Run the Batch Processing API based on inputs stored as class attributes.
 
-        # Go through the files
-        folders = [x for x in s3fs.listdir("/") if not x.endswith("json")]
-
-        # Initialise a dictionnary with information to be stored
-        d = {"tile": [], "geometry": [], "shape": [], "transform": []}
-
-        # Retrieve tiles' name, geometry, shape, and transform from cloud_mask.tif
-        for tile in folders:
-            d["tile"].append(tile)
-            # Open cloud mask band with Rasterio
-            with rasterio.Env(rasterio.session.AWSSession(AWS_session)) as env:
-                s3_url = f"s3://{self.bucket_name}/{self.batchID}/{tile}/cloud_mask.tif"
-                # Fetch information about the raster
-                with rasterio.open(s3_url) as source:
-                    bbox = BBox(source.bounds, CRS(source.crs.to_epsg()))
-                    geometry = Geometry(bbox.geometry, CRS(source.crs.to_epsg()))
-                    d["geometry"].append(geometry)
-                    d["shape"].append(source.shape)
-                    d["transform"].append(source.transform)
-
-        return gpd.GeoDataFrame(d)
-
-    def get_status(self, batchID):
-        """Fetch Batch request status.
-
-        Args:
-            batchID (str): The ID of the Batch request.
-
-        Returns:
-            json: Status of the request.
+        Raises:
+            RuntimeError: All tiles failed.
+            RuntimeError: Batch failed after a fixed number of tries.
         """
-        # Authenticate with SH services
-        oauth = self._authentication()
+        start_url = f"{self.batch_url}/{self.batch_id}/start"
+        self._refresh_token_if_expires()
+        response = self.oauth.request("POST", start_url)
+        for retry in range(3):
+            try:
+                response.raise_for_status()
+                break
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(
+                        f"Failed to start the request. Reason: {exception}"
+                    )
+                    raise RuntimeError("Failed to start batch request.")
+                else:
+                    time.sleep(30)
+                    self._refresh_token_if_expires()
+                    response = self.oauth.request("POST", start_url)
 
-        # Get the status of a batch request
-        status = oauth.request(
-            "GET", f"https://services.sentinel-hub.com/api/v1/batch/process/{batchID}"
-        ).json()["status"]
+    def monitor_batch(self):
+        tiles_status = self._get_tiles_status()
 
-        return status
+        # Build a progressbar
+        pbar = tqdm(total=len(tiles_status))
+
+        # Set counter for while loop
+        retry = 0
+
+        # Start looping on status of the Batch request
+        request_status = self._get_request_status()
+        while request_status != "DONE":
+            if request_status == "FAILED":
+                LOGGER.error("All tiles failed to be processed.")
+                raise RuntimeError(f"Batch: {self.batch_id} is FAILED.")
+            elif request_status == "PARTIAL":
+                if retry < 3:
+                    LOGGER.warning(f"Batch: {self.batch_id} is PARTIALLY DONE. Start re-processing all failed tiles.")
+                    self._restart_partially_processed_request()
+                    retry += 1
+                    time.sleep(30)
+                    request_status = self._get_request_status()
+                else:
+                    LOGGER.error(f"Stop re-processing Batch: {self.batch_id} after 3 tries.")
+                    raise RuntimeError(
+                        f"Batch: {self.batch_id} is PARTIALLY DONE and stop re-processing after 3 tries."
+                    )
+            else:
+                # Get tiles status
+                tiles_status = self._get_tiles_status()
+                pbar.update(Counter(tiles_status)["PROCESSED"])
+                time.sleep(10)
+                request_status = self._get_request_status()
+
+        pbar.close()
+        print(f"Batch: {self.batch_id} is DONE.")
+
+    def get_tile_keys(self):
+        for retry in range(3):
+            try:
+                s3_client = boto3.client(
+                    "s3",
+                    aws_access_key_id=self.config.aws_access_key_id,
+                    aws_secret_access_key=self.config.aws_secret_access_key
+                )
+                common_prefixes = s3_client.list_objects(
+                    Bucket=self.bucket_name,
+                    Prefix=f"{self.batch_id}/",
+                    Delimiter="/"
+                )['CommonPrefixes']
+            except BaseException as exception:
+                if retry == 2:
+                    LOGGER.error(
+                        f"Failed to get tile keys from s3 bucket. Reason: {exception}"
+                    )
+                    raise RuntimeError("Failed to get tile keys from s3 bucket.")
+                else:
+                    time.sleep(30)
+        tile_keys = [prefix['Prefix'] for prefix in common_prefixes]
+        return tile_keys
